@@ -1,0 +1,29 @@
+# Binarios y artefactos de compilacion
+Nexus.exe
+*.exe
+*.dll
+*.pdb
+*.tar.gz
+build/
+dist/
+target/
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.spec
+
+# Entornos y secretos
+.env
+.env.*
+*.key
+*.pem
+
+# Sincronizacion / SO / editores
+.sync/
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.log

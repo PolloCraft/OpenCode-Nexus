@@ -1,0 +1,66 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [master]
+    tags: [v*]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: oplire
+            ext: ''
+            os_name: linux
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
+            binary: oplire.exe
+            ext: '.exe'
+            os_name: windows
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: oplire
+            ext: ''
+            os_name: macos
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: oplire
+            ext: ''
+            os_name: macos-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} release/oplire-${{ matrix.os_name }}${{ matrix.ext }}
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: release/*
+          draft: false
+          prerelease: ${{ contains(github.ref, 'beta') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

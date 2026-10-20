@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 80" width="500" height="80">
+  <defs>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00d4ff"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="500" height="80" fill="#0d1117" rx="12"/>
+
+  <!-- Title text centered -->
+  <text x="250" y="50" text-anchor="middle" font-family="'Segoe UI', 'SF Pro Display', Arial, sans-serif" font-size="44" font-weight="700" fill="url(#textGrad)" dominant-baseline="middle">Oplire-OpenCode</text>
+
+  <!-- Bottom line -->
+  <line x1="30" y1="70" x2="470" y2="70" stroke="#21262d" stroke-width="1"/>
+</svg>
