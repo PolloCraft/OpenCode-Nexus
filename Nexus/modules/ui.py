@@ -64,6 +64,7 @@ ICONS = {
     "play": "\u25ba", "stop": "\u25a0", "ok": "\u2713", "x": "\u00d7",
     "refresh": "\u21bb", "swap": "\u21c4", "star": "\u2605", "warn": "\u2691",
     "restore": "\u21a9", "add": "\u271a", "external": "\u2197", "trash": "\u232b",
+    "claude": "\u273d",
 }
 
 BUTTON_STYLES = {

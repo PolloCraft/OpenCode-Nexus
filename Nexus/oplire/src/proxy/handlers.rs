@@ -24,13 +24,20 @@ use crate::transform::{
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
 const OPENAI_BASE: &str = "https://api.openai.com";
 
-// User-Agents para rotacion (anti-deteccion)
+// User-Agents para rotacion (anti-deteccion) — pool expandido y actualizado
 const USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:134.0) Gecko/20100101 Firefox/134.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
 ];
 
 fn get_random_user_agent() -> &'static str {
@@ -56,14 +63,31 @@ fn random_delay_ms(min_ms: u64, max_ms: u64) -> Duration {
 }
 
 fn create_shared_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    create_shared_client_with_options(false)
+}
+
+/// Creates a client with optional aggressive anti-fingerprint settings.
+/// When `fresh_identity` is true, the pool is set to 0 idle (forces fresh TCP),
+/// disables keep-alive, and uses a brand-new random user-agent.
+fn create_shared_client_with_options(fresh_identity: bool) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(300))
-        .pool_max_idle_per_host(10)
-        .tcp_keepalive(Duration::from_secs(60))
-        .user_agent(get_random_user_agent())
-        .build()
-        .unwrap_or_default()
+        .user_agent(get_random_user_agent());
+
+    if fresh_identity {
+        // Force completely new TCP connections — no reuse of old pool
+        builder = builder
+            .pool_max_idle_per_host(0)
+            .tcp_keepalive(None)
+            .no_proxy(); // Reset proxy state; will reconnect through WARP
+    } else {
+        builder = builder
+            .pool_max_idle_per_host(10)
+            .tcp_keepalive(Duration::from_secs(60));
+    }
+
+    builder.build().unwrap_or_default()
 }
 
 pub async fn handle_models(State(state): State<Arc<Mutex<AppState>>>) -> impl IntoResponse {
@@ -293,6 +317,8 @@ pub async fn handle_messages(
     };
 
     let mut retry_count = 0;
+    let mut free_usage_retries = 0u32;
+    let max_free_usage_retries = warp_resolver.max_retries + 2; // extra attempts for free-usage
     let mut client = create_shared_client();
 
     loop {
@@ -304,6 +330,50 @@ pub async fn handle_messages(
 
         match result {
             Ok(response) => return response,
+            Err(ProxyError::FreeUsageExceeded(msg)) => {
+                free_usage_retries += 1;
+                if free_usage_retries > max_free_usage_retries {
+                    record_limit_reached(
+                        &session_guard,
+                        &opencode_body,
+                        &format!("Free usage exceeded after {} recovery attempts: {}", free_usage_retries - 1, msg),
+                        StatusCode::TOO_MANY_REQUESTS,
+                    ).await;
+                    return error_response("Free usage limit exceeded after recovery attempts. Try clearing cache and sessions.");
+                }
+
+                warn!(
+                    "[FREE-USAGE] Free usage exceeded detected (attempt {}/{}): {}",
+                    free_usage_retries, max_free_usage_retries, msg
+                );
+
+                // Step 1: Clear OpenCode sessions and cache to reset usage tracking
+                info!("[FREE-USAGE] Step 1/3: Clearing session data...");
+                let _ = session_guard.clear_all_sessions().await;
+
+                // Step 2: Clear OpenCode cache (usage counters are often stored here)
+                info!("[FREE-USAGE] Step 2/3: Clearing OpenCode cache via filesystem...");
+                clear_opencode_cache_sync();
+
+                // Step 3: WARP rotation for a fresh IP (the upstream often fingerprints IP + session)
+                info!("[FREE-USAGE] Step 3/3: WARP IP rotation...");
+                if !warp_resolver.handle_429(free_usage_retries - 1).await {
+                    warn!("[FREE-USAGE] WARP reset failed, but continuing with cache-cleared state");
+                }
+
+                // Longer backoff for free-usage errors (upstream caches the "exceeded" state)
+                let backoff_ms = 2000 + (free_usage_retries as u64 * 1500);
+                info!("[FREE-USAGE] Waiting {}ms for upstream state to clear...", backoff_ms);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+
+                // Rebuild with fresh_identity=true for maximum anti-fingerprint
+                client = create_shared_client_with_options(true);
+                {
+                    let mut s = state.lock().await;
+                    s.proxy.client = client.clone();
+                }
+                info!("[FREE-USAGE] Rebuilt client with fresh identity. Retrying...");
+            }
             Err(ProxyError::RateLimited) => {
                 retry_count += 1;
                 if retry_count > warp_resolver.max_retries {
@@ -330,7 +400,7 @@ pub async fn handle_messages(
                     ).await;
                     return error_response("WARP reset failed, rate limit still active");
                 }
-                client = create_shared_client();
+                client = create_shared_client_with_options(true);
                 {
                     let mut s = state.lock().await;
                     s.proxy.client = client.clone();
@@ -403,6 +473,14 @@ async fn forward_streaming_with_client(
         if is_token_limit_error(&body_text) {
             return Err(ProxyError::TokenLimitReached(format!(
                 "Token limit reached: {}",
+                body_text
+            )));
+        }
+
+        // Check free-usage BEFORE generic rate-limit to avoid misclassification
+        if is_free_usage_error(&body_text) {
+            return Err(ProxyError::FreeUsageExceeded(format!(
+                "Free usage limit: {}",
                 body_text
             )));
         }
@@ -501,6 +579,14 @@ async fn forward_non_streaming_with_client(
             )));
         }
 
+        // Check free-usage BEFORE generic rate-limit to avoid misclassification
+        if is_free_usage_error(&body_text) {
+            return Err(ProxyError::FreeUsageExceeded(format!(
+                "Free usage limit: {}",
+                body_text
+            )));
+        }
+
         if is_rate_limit_or_quota_error(status, &body_text) {
             return Err(ProxyError::RateLimited);
         }
@@ -576,8 +662,25 @@ fn detect_anthropic_format(body: &Value) -> bool {
 #[derive(Debug)]
 enum ProxyError {
     RateLimited,
+    /// The upstream returned a "free usage exceeded" / "subscribe to go" error.
+    /// This is NOT a simple rate-limit: it means the session/account free quota
+    /// is exhausted. We need to clear session data + rotate IP + rebuild client.
+    FreeUsageExceeded(String),
     TokenLimitReached(String),
     RequestFailed(String),
+}
+
+/// Detects the specific "free usage exceeded" / "subscribe to go" class of errors.
+/// These require a different recovery strategy than simple rate limits.
+fn is_free_usage_error(body: &str) -> bool {
+    let body_lower = body.to_lowercase();
+    body_lower.contains("free usage exceeded")
+        || (body_lower.contains("usage exceeded") && body_lower.contains("subscribe"))
+        || body_lower.contains("subscribe to go")
+        || body_lower.contains("upgrade to continue")
+        || body_lower.contains("free tier")
+        || body_lower.contains("plan limit")
+        || (body_lower.contains("free") && body_lower.contains("limit") && body_lower.contains("exceeded"))
 }
 
 fn is_rate_limit_or_quota_error(status: StatusCode, body: &str) -> bool {
@@ -585,8 +688,14 @@ fn is_rate_limit_or_quota_error(status: StatusCode, body: &str) -> bool {
         return true;
     }
 
+    // Don't double-classify free-usage errors as rate limits
+    if is_free_usage_error(body) {
+        return false;
+    }
+
     let body_lower = body.to_lowercase();
 
+    // Standard rate limit / quota indicators
     body_lower.contains("rate limit")
         || body_lower.contains("token limit")
         || body_lower.contains("quota exceeded")
@@ -596,6 +705,12 @@ fn is_rate_limit_or_quota_error(status: StatusCode, body: &str) -> bool {
         || body_lower.contains("requests per")
         || body_lower.contains("credits")
         || body_lower.contains("usage limit")
+        || body_lower.contains("usage exceeded")
+        || body_lower.contains("monthly limit")
+        || body_lower.contains("daily limit")
+        || body_lower.contains("usage limit reached")
+        || body_lower.contains("quota limit")
+        || body_lower.contains("billing")
 }
 
 fn is_token_limit_error(body: &str) -> bool {

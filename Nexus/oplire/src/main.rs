@@ -43,9 +43,9 @@ enum Commands {
         upstream: String,
         #[arg(long)]
         api_key: Option<String>,
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "5")]
         max_retries: u32,
-        #[arg(long, default_value = "5000")]
+        #[arg(long, default_value = "3000")]
         warp_delay: u64,
     },
     Connect {
@@ -55,9 +55,9 @@ enum Commands {
     Watch {
         #[arg(long, default_value = "http://localhost:3000")]
         upstream: String,
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "5")]
         max_retries: u32,
-        #[arg(long, default_value = "5000")]
+        #[arg(long, default_value = "3000")]
         warp_delay: u64,
     },
     Daemon {
@@ -67,9 +67,9 @@ enum Commands {
         upstream: String,
         #[arg(long)]
         api_key: Option<String>,
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "5")]
         max_retries: u32,
-        #[arg(long, default_value = "5000")]
+        #[arg(long, default_value = "3000")]
         warp_delay: u64,
     },
     Config {
@@ -89,9 +89,9 @@ enum Commands {
         upstream: String,
         #[arg(long)]
         api_key: Option<String>,
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "5")]
         max_retries: u32,
-        #[arg(long, default_value = "5000")]
+        #[arg(long, default_value = "3000")]
         warp_delay: u64,
     },
     SetupDesktop {
@@ -126,9 +126,9 @@ enum ConnectTarget {
         upstream: String,
         #[arg(long)]
         api_key: Option<String>,
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "5")]
         max_retries: u32,
-        #[arg(long, default_value = "5000")]
+        #[arg(long, default_value = "3000")]
         warp_delay: u64,
         #[arg(long)]
         model: Option<String>,
@@ -140,9 +140,9 @@ enum ConnectTarget {
     Desktop {
         #[arg(long, default_value = "127.0.0.1:8080")]
         listen: String,
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "5")]
         max_retries: u32,
-        #[arg(long, default_value = "5000")]
+        #[arg(long, default_value = "3000")]
         warp_delay: u64,
     },
 }
@@ -157,9 +157,9 @@ enum ConfigAction {
         listen: String,
         #[arg(long, default_value = "http://localhost:3000")]
         upstream: String,
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "5")]
         max_retries: u32,
-        #[arg(long, default_value = "5000")]
+        #[arg(long, default_value = "3000")]
         warp_delay: u64,
     },
     Reset {},

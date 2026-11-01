@@ -227,8 +227,8 @@ impl Default for ProxyConfig {
             listen_addr: "127.0.0.1:8080".to_string(),
             opencode_base_url: "http://localhost:3000".to_string(),
             opencode_api_key: None,
-            max_retries: 3,
-            warp_reset_delay_ms: 5000,
+            max_retries: 5,
+            warp_reset_delay_ms: 3000,
         }
     }
 }
@@ -302,8 +302,8 @@ impl Default for AppConfig {
         Self {
             listen: "127.0.0.1:8080".to_string(),
             upstream: "http://localhost:3000".to_string(),
-            max_retries: 3,
-            warp_delay: 5000,
+            max_retries: 5,
+            warp_delay: 3000,
         }
     }
 }

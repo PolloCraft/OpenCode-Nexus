@@ -245,7 +245,6 @@ def _opencode_candidates():
                   os.path.join(local, "Microsoft", "WinGet", "Links", "opencode.exe")]
     cands += [os.path.join(home, ".opencode", "bin", "opencode.exe"),
               os.path.join(home, ".opencode", "bin", "opencode"),
-              os.path.join(home, ".bun", "bin", "opencode.exe"),
               os.path.join(home, ".local", "bin", "opencode.exe"),
               os.path.join(home, ".local", "bin", "opencode")]
     return cands
@@ -325,8 +324,20 @@ def get_plugin_cache_dirs():
     return dirs
 
 
+def _plugin_cache_valid(cache_dir):
+    """True solo si la cache contiene el paquete real, no una carpeta vacia."""
+    if not cache_dir or not os.path.isdir(cache_dir):
+        return False
+    for rel in ((PLUGIN_NAME, "package.json"),
+                ("node_modules", PLUGIN_NAME, "package.json"),
+                ("node_modules", PLUGIN_NAME, "dist", "index.js")):
+        if os.path.isfile(os.path.join(cache_dir, *rel)):
+            return True
+    return False
+
+
 def test_plugin_cached():
-    return len(get_plugin_cache_dirs()) > 0
+    return any(_plugin_cache_valid(d) for d in get_plugin_cache_dirs())
 
 
 def test_plugin_configured(config_file=None):
@@ -425,6 +436,9 @@ def disable_plugin_auto_update():
 
 
 def install_plugin_to_cache():
+    npm = shutil.which("npm")
+    if not npm:
+        return False, "npm no esta instalado (instala Node.js LTS)."
     root = None
     for r in get_plugin_cache_roots():
         if os.path.isdir(r):
@@ -433,21 +447,31 @@ def install_plugin_to_cache():
     if not root:
         root = os.path.join(C.user_home(), ".cache", "opencode", "packages")
     cache_dir = os.path.join(root, f"{PLUGIN_NAME}@latest")
-    os.makedirs(cache_dir, exist_ok=True)
-    npm = shutil.which("npm")
-    if not npm:
-        return False, "npm no esta instalado."
+    existed = os.path.isdir(cache_dir)
     try:
-        subprocess.run(
+        os.makedirs(cache_dir, exist_ok=True)
+        result = subprocess.run(
             [npm, "install", f"{PLUGIN_NAME}@latest", "--prefix", cache_dir,
              "--no-audit", "--no-fund"],
-            capture_output=True, timeout=600,
+            capture_output=True, text=True, timeout=600,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception as e:
+        if not existed:
+            shutil.rmtree(cache_dir, ignore_errors=True)
         return False, f"Fallo la instalacion: {e}"
-    ok = os.path.isdir(os.path.join(cache_dir, "node_modules", PLUGIN_NAME))
-    return ok, ("Plugin instalado en cache." if ok else "No se pudo instalar el plugin.")
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        if not existed:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        return False, ("npm no pudo instalar el plugin."
+                       + (f"\n{detail[-1][:300]}" if detail else ""))
+    if not _plugin_cache_valid(cache_dir):
+        if not existed:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        return False, "npm termino pero la cache del plugin quedo incompleta."
+    disable_plugin_auto_update()
+    return True, "Plugin instalado en cache."
 
 
 # ------------------------------------------------------------ cuentas ------
@@ -507,6 +531,115 @@ def get_quotas():
     return out
 
 
+def quota_script():
+    """Ruta al script real de cuotas (Nexus/antigravity/scripts/check-quota.mjs)."""
+    bases = C.candidate_bases()
+    for base in bases:
+        for cand in (os.path.join(base, "antigravity", "scripts", "check-quota.mjs"),
+                     os.path.join(base, "scripts", "check-quota.mjs"),
+                     os.path.join(base, "antigravity", "check-quota.mjs")):
+            if os.path.isfile(cand):
+                return cand
+    return ""
+
+
+def parse_quota_output(text):
+    """
+    Convierte la salida de check-quota.mjs en datos estructurados:
+      [{"index":1,"email":"...","disabled":False,"project":"...","pools":[
+          {"name":"Claude","status":"OK","pct":87,"reset":"3h 2m"}], "error": ""}]
+    """
+    accounts = []
+    current = None
+    for raw in (text or "").splitlines():
+        line = raw.rstrip()
+        m = re.match(r"^\s*(\d+)\.\s+(.+?)(\s+\(disabled\))?\s*$", line)
+        if m and not line.startswith("   "):
+            current = {
+                "index": int(m.group(1)),
+                "email": m.group(2).strip(),
+                "disabled": bool(m.group(3)),
+                "project": "",
+                "pools": [],
+                "error": "",
+            }
+            accounts.append(current)
+            continue
+        if current is None:
+            continue
+        body = line.strip()
+        if body.startswith("project:"):
+            current["project"] = body.split(":", 1)[1].strip()
+            continue
+        if body.startswith("error:"):
+            current["error"] = body.split(":", 1)[1].strip()
+            continue
+        pm = re.match(r"^(.+?):\s*(OK|LIMITED|UNKNOWN)\s*(?:\((.*)\))?\s*$", body)
+        if pm:
+            details = pm.group(3) or ""
+            pct = None
+            pm_pct = re.search(r"remaining\s+(\d+)%", details)
+            if pm_pct:
+                pct = int(pm_pct.group(1))
+            reset = ""
+            pm_reset = re.search(r"resets in\s+(.+?)(?:,|$)", details)
+            if pm_reset:
+                reset = pm_reset.group(1).strip()
+            current["pools"].append({
+                "name": pm.group(1).strip(),
+                "status": pm.group(2),
+                "pct": pct,
+                "reset": reset,
+            })
+    return accounts
+
+
+def quotas_live(timeout=150):
+    """
+    Consulta cuotas REALES en linea (check-quota.mjs). Devuelve
+    (ok, texto_original, datos_parseados). Requiere node y cuentas.
+    """
+    if not C.which("node"):
+        return False, "Node.js no esta instalado; no se pueden consultar cuotas en linea.", []
+    script = quota_script()
+    if not script:
+        return False, "No se encontro el script de cuotas (antigravity/scripts/check-quota.mjs).", []
+    accounts_file = get_accounts_file()
+    if not os.path.isfile(accounts_file):
+        return False, ("No hay cuentas Antigravity guardadas.\n"
+                       "Abre 'Plugin > Anadir cuenta' y completa el login OAuth."), []
+    rc, out = C.run_cmd(["node", script, "--path", accounts_file],
+                        timeout=timeout, cwd=os.path.dirname(script))
+    text = C.strip_ansi(out or "").strip()
+    data = parse_quota_output(text)
+    ok = rc == 0 and bool(data)
+    if not text:
+        text = "El script de cuotas no devolvio salida."
+    if not ok and not data:
+        # Errores tipicos del script (cuentas.json ausente/corrupto).
+        text = text or "No se pudieron obtener las cuotas."
+    return ok, text, data
+
+
+def quotas_report():
+    """Cuotas en texto legible + datos. Si falla en linea, usa la cache local."""
+    ok, text, data = quotas_live()
+    if ok and data:
+        return True, text, data
+    cached = get_quotas()
+    if cached:
+        lines = [text, "", "--- Cache local (ultima cuota conocida) ---"]
+        for email, pools in cached:
+            lines.append(email)
+            if not pools:
+                lines.append("   (sin datos en cache)")
+            for pool, pct, when in pools:
+                extra = f"  resets {when}" if when else ""
+                lines.append(f"   {pool}: {pct}{extra}")
+        return False, "\n".join(lines), []
+    return ok, text, data
+
+
 def set_account_enabled(index, enabled=None):
     """Activa/desactiva (o alterna) la cuenta por indice 1-based."""
     accounts_file, data, accounts = load_accounts()
@@ -564,36 +697,44 @@ def delete_account(index):
 # ------------------------------------------------------------ plugin -------
 
 def enable_plugin():
+    """
+    Activa el plugin Y deja los modelos listos en opencode.json.
+    Hacerlo en un solo paso evita el fallo clasico de 'modelos no cargan'
+    tras el primer arranque sin configurar.
+    """
     config_dir = get_config_dir()
     config_file = get_config_file(config_dir) or os.path.join(config_dir, "opencode.json")
+    already = test_plugin_configured(config_file)
 
-    if test_plugin_configured(config_file):
-        return True, "El plugin ya estaba configurado."
+    if not already:
+        obj = read_json(config_file)
+        if obj is None:
+            obj = {"$schema": "https://opencode.ai/config.json", "plugin": []}
 
-    obj = read_json(config_file)
-    if obj is None:
-        obj = {"$schema": "https://opencode.ai/config.json", "plugin": []}
+        plugins = obj.get("plugin") or []
+        if isinstance(plugins, str):
+            plugins = [plugins]
+        plugins = list(plugins)
+        if not any(isinstance(p, str) and PLUGIN_NAME in p for p in plugins):
+            plugins.append(f"{PLUGIN_NAME}@latest")
+        obj["plugin"] = plugins
+        if not obj.get("$schema"):
+            obj["$schema"] = "https://opencode.ai/config.json"
 
-    plugins = obj.get("plugin") or []
-    if isinstance(plugins, str):
-        plugins = [plugins]
-    plugins = list(plugins)
-    if not any(isinstance(p, str) and PLUGIN_NAME in p for p in plugins):
-        plugins.append(f"{PLUGIN_NAME}@latest")
-    obj["plugin"] = plugins
-    if not obj.get("$schema"):
-        obj["$schema"] = "https://opencode.ai/config.json"
-
-    backup_file(config_file)
-    try:
-        save_json(obj, config_file)
-    except OSError as e:
-        return False, f"No se pudo guardar la config: {e}"
+        backup_file(config_file)
+        try:
+            save_json(obj, config_file)
+        except OSError as e:
+            return False, f"No se pudo guardar la config: {e}"
 
     patched, checked = repair_plugin_node_compat()
     disable_plugin_auto_update()
     extra = f" | parche Node: {patched}/{checked}" if checked else ""
-    return True, f"Plugin ACTIVADO en {config_file}{extra}. Reinicia OpenCode."
+    ok_models, msg_models = configure_models()
+    models_note = " | modelos listos" if ok_models else f" | modelos: {msg_models}"
+    if already:
+        return True, f"El plugin ya estaba configurado.{models_note} Reinicia OpenCode.{extra}"
+    return True, f"Plugin ACTIVADO en {config_file}{models_note}{extra}. Reinicia OpenCode."
 
 
 def disable_plugin():
@@ -838,7 +979,7 @@ def mask_key(key):
 # --------------------------------------------------------- mantenimiento ----
 
 def repair_plugin():
-    dirs = get_plugin_cache_dirs()
+    dirs = [d for d in get_plugin_cache_dirs() if _plugin_cache_valid(d)]
     installed = False
     if not dirs:
         ok, msg = install_plugin_to_cache()
@@ -869,11 +1010,30 @@ def auto_configure_plugin():
 
 
 def startup_silent_repair():
+    """
+    Reparacion NO invasiva al iniciar NEXUS.
+    Importante: NO configura el plugin ni escribe en opencode.json en el
+    primer arranque (eso provocaba errores y modelos sin cargar). Solo
+    parchea la cache si el plugin YA esta instalado; todo lo demas es
+    accion explicita del usuario desde la UI.
+    """
     try:
-        auto_configure_plugin()
+        if get_plugin_cache_dirs():
+            repair_plugin_node_compat()
     except Exception:
         pass
-    try:
-        repair_plugin_node_compat()
-    except Exception:
-        pass
+
+
+def models_catalog():
+    """Catalogo de modelos gestionados por Antigravity, listo para la GUI."""
+    out = []
+    for model_id, info in MODELS.items():
+        limit = info.get("limit") or {}
+        out.append({
+            "id": model_id,
+            "name": info.get("name") or model_id,
+            "context": limit.get("context"),
+            "output": limit.get("output"),
+            "variants": list((info.get("variants") or {}).keys()),
+        })
+    return out

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import subprocess
 import ctypes
@@ -7,7 +7,7 @@ import webbrowser
 import random
 import shutil
 
-VERSION = "6.0.0 Nexus"
+VERSION = "7.3.1 Nexus"
 ANTIGRAVITY_FOLDER_NAME = "antigravity"
 OPLIRE_FOLDER_NAME = "oplire"
 EVERYTHING_URL = "https://www.voidtools.com/es-es/"
@@ -25,6 +25,11 @@ try:
     import antigravity_menu
 except ImportError:
     antigravity_menu = None
+
+try:
+    from modules import claude_ops as claude_ops
+except Exception:
+    claude_ops = None
 
 
 def clear():
@@ -569,6 +574,116 @@ def local_server_menu(work_dir):
             break
 
 
+def claude_menu():
+    if not claude_ops:
+        clear()
+        print_banner()
+        print_section("CLAUDE / FCC NO DISPONIBLE")
+        print("  No se encontro modules/claude_ops.py junto a Nexus.")
+        pause()
+        return
+    CL = claude_ops
+    while True:
+        clear()
+        print_banner()
+        print_section("FREE CLAUDE CODE (FCC)")
+        try:
+            st = CL.status()
+            print(f"  Proyecto : {st['project_dir'] or 'NO ENCONTRADO'}")
+            print(f"  Servidor : {'ACTIVO' if st['server_running'] else 'detenido'}  ·  {st['proxy_url']}")
+            print(f"  Admin UI : {st['admin_url']}")
+            print(f"  Modelo   : {st['model'] or '(por defecto en Admin UI)'}")
+            print(f"  uv       : {st['uv'] or 'NO INSTALADO'}")
+            print(f"  Entorno  : {'sincronizado' if st['venv'] else 'sin sincronizar'}")
+            print(f"  Claves   : {', '.join(st['providers']) or '(ninguna)'}")
+        except Exception as e:
+            print(f"  \033[33mNo se pudo leer el estado: {e}\033[0m")
+        print()
+        print_option("1", "Estado completo", "Proyecto, uv, entorno, servidor, claves")
+        print_option("2", "Iniciar servidor FCC", "uv run --no-dev fcc-server")
+        print_option("3", "Detener servidor FCC", "Solo si el puerto es de FCC")
+        print_option("4", "Abrir Admin UI", "http://127.0.0.1:8082/admin")
+        print_option("5", "Abrir proxy", "http://127.0.0.1:8082")
+        print_option("6", "Agentes FCC", "claude / codex / opencode / ...")
+        print_option("7", "fcc-doctor", "Diagnostico oficial")
+        print_option("8", "Diagnostico local", "Rapido, sin red")
+        print_option("9", "Instalar/sincronizar uv + deps", "Preparar el proyecto")
+        print_option("0", "Volver")
+        print()
+        option = input("  \033[1;36m>>\033[0m Selecciona una opcion: ").strip()
+
+        if option == "1":
+            clear()
+            print_banner()
+            print_section("ESTADO CLAUDE / FCC")
+            print(CL.local_diagnostics())
+            pause()
+        elif option == "2":
+            ok, msg = CL.start_server()
+            print(("  \033[32m[OK] " if ok else "  \033[31m[ERROR] ") + msg + "\033[0m")
+            pause()
+        elif option == "3":
+            ok, msg = CL.stop_server()
+            print(("  \033[32m[OK] " if ok else "  \033[31m[ERROR] ") + msg + "\033[0m")
+            pause()
+        elif option == "4":
+            CL.open_admin()
+        elif option == "5":
+            CL.open_proxy()
+        elif option == "6":
+            clear()
+            print_banner()
+            print_section("AGENTES FCC")
+            items = list(CL.AGENTS.items())
+            for i, (key, (label, cmd)) in enumerate(items, 1):
+                print_option(str(i), label, cmd)
+            print_option("0", "Volver")
+            sel = input("  \033[1;36m>>\033[0m Agente: ").strip()
+            if sel.isdigit() and 1 <= int(sel) <= len(items):
+                key = items[int(sel) - 1][0]
+                ok, msg = CL.run_agent(key, cwd=get_script_dir())
+                print(("  \033[32m[OK] " if ok else "  \033[31m[ERROR] ") + msg + "\033[0m")
+                pause()
+        elif option == "7":
+            clear()
+            print_banner()
+            print_section("FCC DOCTOR")
+            print("  Ejecutando fcc-doctor (puede tardar)...")
+            ok, out = CL.doctor()
+            print()
+            print(out or "(sin salida)")
+            print()
+            print(("  \033[32m[OK] " if ok else "  \033[31m[ERROR] ") + "fcc-doctor finalizado\033[0m")
+            pause()
+        elif option == "8":
+            clear()
+            print_banner()
+            print_section("DIAGNOSTICO LOCAL")
+            print(CL.local_diagnostics())
+            pause()
+        elif option == "9":
+            clear()
+            print_banner()
+            print_section("UV + DEPENDENCIAS")
+            print_option("1", "Instalar uv", "Instalador oficial")
+            print_option("2", "Sincronizar dependencias", "uv sync")
+            print_option("3", "Actualizar uv + deps", "Actualizacion completa")
+            print_option("0", "Volver")
+            sel = input("  \033[1;36m>>\033[0m Opcion: ").strip()
+            if sel == "1":
+                ok, msg = CL.install_uv()
+            elif sel == "2":
+                ok, msg = CL.sync_dependencies()
+            elif sel == "3":
+                ok, msg = CL.update_project()
+            else:
+                continue
+            print(("  \033[32m[OK] " if ok else "  \033[31m[ERROR] ") + msg + "\033[0m")
+            pause()
+        elif option == "0":
+            break
+
+
 def main():
     if not is_admin():
         clear()
@@ -632,6 +747,14 @@ def main():
         ag_state = antigravity_dir if antigravity_dir else "\033[31mno encontrado\033[0m"
         print(f"  \033[90mMotor Oplire:       {oplire_state}\033[0m")
         print(f"  \033[90mMotor Antigravity:  {ag_state}\033[0m")
+        if claude_ops:
+            try:
+                cl_state = claude_ops.project_dir() or "\033[31mno encontrado\033[0m"
+            except Exception:
+                cl_state = "\033[31mno disponible\033[0m"
+        else:
+            cl_state = "\033[31mno disponible\033[0m"
+        print(f"  \033[90mMotor Claude FCC:   {cl_state}\033[0m")
         admin_status = "\033[32mAdmin\033[0m" if is_admin() else "\033[33mUsuario\033[0m"
         print(f"  \033[90mPermisos:           {admin_status}\033[0m")
         print(f"  \033[90mVersion:            {VERSION}\033[0m")
@@ -647,6 +770,7 @@ def main():
             print_option("7", "Antigravity", "Cuentas Google / plugin")
         else:
             print(f"  \033[90m[7] Antigravity                - no disponible\033[0m")
+        print_option("8", "Claude (FCC)", "Servidor, agentes, doctor")
         print_option("0", "Salir")
         print()
         print(f"  \033[36m{'=' * 54}\033[0m")
@@ -699,6 +823,8 @@ def main():
                 print("  Verifica que antigravity_menu.py este junto a nexus_menu.py")
                 print("  y que exista la carpeta antigravity/.")
                 pause()
+        elif option == "8":
+            claude_menu()
         elif option == "0":
             clear()
             print_banner()

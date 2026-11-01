@@ -30,10 +30,73 @@ import urllib.error
 import urllib.request
 
 APP_NAME = "NEXUS Suite"
-APP_VERSION = "7.0.0"
+APP_VERSION = "7.3.1"
 
 OPLIRE_ENGINE = "oplire"
 ANTIGRAVITY_ENGINE = "antigravity"
+CLAUDE_ENGINE = "claude"
+
+# Documentacion de las variables de entorno que gestiona NEXUS.
+# Cada entrada: (para que sirve, valor recomendado, alcance)
+ENV_HELP = {
+    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": (
+        "Amplia el limite maximo de tokens de SALIDA por respuesta de OpenCode "
+        "(por defecto el motor aplica un tope conservador). 512000 permite "
+        "respuestas largas (codigo, informes) sin truncarlas. Solo afecta a "
+        "OpenCode y a los procesos nuevos que se abran tras aplicarla.",
+        "512000",
+        "OpenCode",
+    ),
+    "OPENCODE_CONFIG_DIR": (
+        "Fuerza la carpeta de configuracion de OpenCode (cuentas, plugin y "
+        "opencode.json). Util si usas una configuracion portable.",
+        "",
+        "OpenCode",
+    ),
+    "OPENCODE_BIN": (
+        "Ruta explicita al ejecutable de OpenCode. NEXUS lo detecta aqui si no "
+        "esta en el PATH.",
+        "",
+        "OpenCode",
+    ),
+    "NEXUS_OPENCODE": (
+        "Ruta alternativa al ejecutable de OpenCode usada por NEXUS para "
+        "detectarlo sin depender del PATH.",
+        "",
+        "NEXUS",
+    ),
+    "OPLIRE_PROJECT_PATH": (
+        "Ruta a la carpeta del motor Oplire. Permite ubicarlo cuando NEXUS se "
+        "ejecuta desde otra unidad o carpeta.",
+        "",
+        "Oplire",
+    ),
+    "ANTIGRAVITY_PROJECT_PATH": (
+        "Ruta a la carpeta del plugin Antigravity. Permite ubicarlo cuando "
+        "NEXUS se ejecuta desde otra unidad o carpeta.",
+        "",
+        "Antigravity",
+    ),
+    "GOOGLE_GENERATIVE_AI_API_KEY": (
+        "API key de Google AI Studio. Se usa cuando el plugin Antigravity esta "
+        "desactivado (modelos gemini-*). Persiste para procesos nuevos.",
+        "",
+        "Antigravity",
+    ),
+    "GEMINI_API_KEY": (
+        "Alias de la API key de Google usada por la CLI de Gemini y por Free "
+        "Claude Code para el proveedor Gemini.",
+        "",
+        "Compartida",
+    ),
+    "NO_PROXY": (
+        "Lista de hosts que NO deben pasar por el proxy (separados por coma). "
+        "Incluye 127.0.0.1,localhost para que el dashboard y OpenCode local "
+        "nunca se enruten a traves del proxy.",
+        "127.0.0.1,localhost",
+        "Red",
+    ),
+}
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -72,6 +135,7 @@ def resolve_engine_dir(name):
     env_key = {
         OPLIRE_ENGINE: "OPLIRE_PROJECT_PATH",
         ANTIGRAVITY_ENGINE: "ANTIGRAVITY_PROJECT_PATH",
+        CLAUDE_ENGINE: "CLAUDE_PROJECT_PATH",
     }.get(name, "")
     if env_key:
         env = os.environ.get(env_key, "")
@@ -93,6 +157,59 @@ def antigravity_dir():
     return d if os.path.isdir(d) else ""
 
 
+def _is_fcc_project(path):
+    """True solo si la carpeta contiene el pyproject real de Free Claude Code."""
+    if not path or not os.path.isdir(path):
+        return False
+    pyproject = os.path.join(path, "pyproject.toml")
+    if not os.path.isfile(pyproject):
+        return False
+    try:
+        with open(pyproject, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        return 'name = "free-claude-code"' in head or "free_claude_code" in head
+    except OSError:
+        return False
+
+
+def claude_dir():
+    """Carpeta REAL del proyecto Free Claude Code, o '' si no esta instalado."""
+    candidates = []
+    env = os.environ.get("CLAUDE_PROJECT_PATH", "").strip()
+    if env:
+        candidates.append(os.path.abspath(os.path.expanduser(env)))
+    for base in candidate_bases():
+        for sub in (
+            ("claude",),
+            ("claude", "free-claude-code"),
+            ("claude", "free_claude_code"),
+            ("Nexus", "claude"),
+            ("Nexus", "claude", "free-claude-code"),
+            ("free-claude-code",),
+        ):
+            candidates.append(os.path.join(base, *sub))
+    seen = set()
+    for cand in candidates:
+        key = os.path.normcase(os.path.abspath(cand))
+        if key in seen:
+            continue
+        seen.add(key)
+        if _is_fcc_project(cand):
+            return os.path.abspath(cand)
+    # Ultimo recurso: un unico subdirectorio valido dentro de claude/.
+    for base in candidate_bases():
+        claude_root = os.path.join(base, "claude")
+        try:
+            entries = os.listdir(claude_root)
+        except OSError:
+            continue
+        for entry in entries:
+            cand = os.path.join(claude_root, entry)
+            if _is_fcc_project(cand):
+                return os.path.abspath(cand)
+    return ""
+
+
 def user_home():
     return (os.environ.get("USERPROFILE")
             or os.environ.get("HOME")
@@ -109,10 +226,10 @@ def which(name):
 
 
 def tool_available(name):
-    return which(name) is not None
+    return which(name) is not None or bool(_which_ext(name))
 
 
-def run_cmd(cmd, timeout=60, cwd=None):
+def run_cmd(cmd, timeout=60, cwd=None, env=None):
     """Ejecuta un comando capturando salida. cmd puede ser lista o string."""
     try:
         r = subprocess.run(
@@ -121,6 +238,7 @@ def run_cmd(cmd, timeout=60, cwd=None):
             text=True,
             timeout=timeout,
             cwd=cwd,
+            env=env,
             shell=isinstance(cmd, str),
             creationflags=_NO_WINDOW,
             encoding="utf-8",
@@ -138,7 +256,7 @@ def run_cmd(cmd, timeout=60, cwd=None):
         return -1, f"[ERROR] {e}"
 
 
-def open_new_console(cmd, cwd=None, title="NEXUS"):
+def open_new_console(cmd, cwd=None, title="NEXUS", env=None):
     """
     Abre una consola CMD nueva, VISIBLE y persistente (/k) ejecutando el comando.
 
@@ -154,13 +272,13 @@ def open_new_console(cmd, cwd=None, title="NEXUS"):
     # 'title' fija el nombre de la ventana; '&' separa del comando real.
     line = f'{comspec} /k title {title} & {inner}'
     try:
-        subprocess.Popen(line, cwd=cwd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        subprocess.Popen(line, cwd=cwd, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
         return True
     except Exception:
         pass
     # Respaldo: usar el shell con 'start' (sin CREATE_NO_WINDOW para no ocultarla).
     try:
-        subprocess.Popen(f'start "{title}" cmd /k {inner}', shell=True, cwd=cwd)
+        subprocess.Popen(f'start "{title}" cmd /k {inner}', shell=True, cwd=cwd, env=env)
         return True
     except Exception:
         return False
@@ -176,6 +294,25 @@ def open_terminal(cwd=None, title="NEXUS Terminal"):
     if not os.path.isdir(cwd):
         cwd = get_base_dir()
     return open_new_console(f'cd /d "{cwd}"', cwd=cwd, title=title)
+
+
+def open_path(path):
+    """Abre una carpeta o archivo con la aplicacion predeterminada de Windows."""
+    try:
+        target = os.path.abspath(os.path.expanduser(path))
+    except Exception:
+        target = path
+    if not os.path.exists(target):
+        return False
+    try:
+        os.startfile(target)
+        return True
+    except Exception:
+        try:
+            subprocess.Popen(["explorer", target])
+            return True
+        except Exception:
+            return False
 
 
 def kill_process(image_name):
@@ -285,8 +422,12 @@ def path_contains(folder):
     return False
 
 
-def add_to_user_path(folder):
-    """Anade una carpeta al PATH del usuario (persistente). Tambien al proceso."""
+def add_to_user_path(folder, prepend=False):
+    """
+    Anade una carpeta al PATH del usuario (persistente). Tambien al proceso.
+    prepend=True la coloca AL PRINCIPIO para que sus ejecutables ganen en
+    prioridad (util para npm/OpenCode cuando hay varias versiones).
+    """
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
         return False, f"La carpeta no existe: {folder}"
@@ -294,11 +435,14 @@ def add_to_user_path(folder):
         _ensure_process_path(folder)
         return True, "La carpeta ya estaba en el PATH."
     current = get_user_path().rstrip(os.pathsep)
-    new_value = (current + os.pathsep + folder) if current else folder
+    if prepend:
+        new_value = (folder + os.pathsep + current) if current else folder
+    else:
+        new_value = (current + os.pathsep + folder) if current else folder
     ok, msg = set_user_path(new_value)
     if ok:
         _ensure_process_path(folder)
-        return True, f"Anadido al PATH: {folder}"
+        return True, f"Anadido al PATH: {folder}" + (" (al principio)" if prepend else "")
     return False, msg
 
 
@@ -376,15 +520,15 @@ def open_env_vars_dialog():
     return False
 
 
-def run_program(args, timeout=60, cwd=None):
+def run_program(args, timeout=60, cwd=None, env=None):
     """Ejecuta un programa manejando .cmd/.bat en Windows."""
     if not args:
         return -1, "[ERROR] comando vacio"
     exe = str(args[0])
     if os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
         line = subprocess.list2cmdline([str(a) for a in args])
-        return run_cmd(line, timeout=timeout, cwd=cwd)
-    return run_cmd(list(args), timeout=timeout, cwd=cwd)
+        return run_cmd(line, timeout=timeout, cwd=cwd, env=env)
+    return run_cmd(list(args), timeout=timeout, cwd=cwd, env=env)
 
 
 # --------------------------------------------------------------- disco -----
@@ -457,25 +601,225 @@ def memory_info():
     return 0, 0
 
 
+def _os_pretty():
+    """Nombre comercial del sistema (Windows 11/10, build) sin dependencias."""
+    if os.name != "nt":
+        return f"{platform.system()} {platform.release()}"
+    try:
+        edition = platform.win32_edition()
+    except Exception:
+        edition = ""
+    rel = platform.release()
+    build = platform.version().split(".")[-1] if platform.version() else ""
+    # Windows 11 comparte "10" en platform.release(); el build lo distingue.
+    if rel == "10":
+        try:
+            if int(build) >= 22000:
+                rel = "11"
+        except (TypeError, ValueError):
+            pass
+    label = f"Windows {rel}"
+    if edition:
+        label += f" {edition}"
+    if build:
+        label += f" (build {build})"
+    return label
+
+
+def _cpu_name():
+    if os.name == "nt":
+        try:
+            import winreg
+            key = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as k:
+                name, _ = winreg.QueryValueEx(k, "ProcessorNameString")
+                if name:
+                    return str(name).strip()
+        except Exception:
+            pass
+    return platform.processor() or "?"
+
+
+def _uptime_seconds():
+    if os.name == "nt":
+        try:
+            return int(ctypes.windll.kernel32.GetTickCount64() / 1000)
+        except Exception:
+            pass
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as f:
+            return int(float(f.read().split()[0]))
+    except Exception:
+        return 0
+
+
+def human_uptime(seconds):
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return "?"
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {mins}m"
+    if hours:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
+def local_ip():
+    """IP local preferida (no envia trafico real: UDP connect sin datos)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        pass
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except Exception:
+        return ""
+
+
+def is_private_ip(ip):
+    try:
+        parts = [int(p) for p in str(ip).split(".")]
+        if len(parts) != 4:
+            return None
+        a, b = parts[0], parts[1]
+        if a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168):
+            return True
+        if a == 127:
+            return True
+        if a == 169 and b == 254:
+            return True
+        return False
+    except Exception:
+        return None
+
+
+def public_ip(timeout=4):
+    """IP publica (salida a internet). Devuelve '' si no hay conexion."""
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "NEXUS-Suite"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                value = r.read(64).decode("ascii", "ignore").strip()
+            if value and len(value) <= 45:
+                return value
+        except Exception:
+            continue
+    return ""
+
+
+_NET_CACHE = {"ts": 0.0, "data": None}
+
+
+def network_info(ttl=15):
+    """
+    Red del equipo en tiempo real: IP local, IP publica, tipo de red
+    (privada/publica), adaptadores activos, puerta de enlace y conectividad.
+    Portable: si no hay PowerShell o falla, devuelve lo basico sin romper la UI.
+    Cache breve (ttl) para no lanzar PowerShell en cada refresco.
+    """
+    cached = _NET_CACHE.get("data")
+    if cached and (time.time() - _NET_CACHE.get("ts", 0)) < ttl:
+        return cached
+    ip = local_ip()
+    info = {
+        "local_ip": ip or "no detectada",
+        "public_ip": "",
+        "private": is_private_ip(ip) if ip else None,
+        "hostname": socket.gethostname(),
+        "gateway": "",
+        "adapters": [],
+        "dns": "",
+        "internet": None,
+    }
+    if os.name == "nt":
+        ps = (
+            "$ErrorActionPreference='SilentlyContinue';"
+            "$cfg = Get-NetIPConfiguration | Where-Object {$_.IPv4Address} | "
+            "Select-Object InterfaceAlias,InterfaceDescription,@{n='ip';e={$_.IPv4Address.IPAddress}},"
+            "@{n='gw';e={$_.IPv4DefaultGateway.NextHop}};"
+            "$prof = Get-NetConnectionProfile | Select-Object Name,InterfaceAlias,NetworkCategory;"
+            "@{cfg=@($cfg);prof=@($prof);dns=(Get-DnsClientServerAddress -AddressFamily IPv4 | "
+            "Where-Object {$_.ServerAddresses} | Select-Object -First 1 -ExpandProperty ServerAddresses)} | "
+            "ConvertTo-Json -Depth 4 -Compress"
+        )
+        rc, out = run_cmd(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], timeout=20)
+        if rc == 0 and out.strip():
+            try:
+                data = json.loads(out.strip())
+                cfg = data.get("cfg") or []
+                prof = data.get("prof") or []
+                if isinstance(cfg, dict):
+                    cfg = [cfg]
+                if isinstance(prof, dict):
+                    prof = [prof]
+                cat = {p.get("InterfaceAlias"): p.get("NetworkCategory") for p in prof if isinstance(p, dict)}
+                for c in cfg:
+                    if not isinstance(c, dict) or not c.get("ip"):
+                        continue
+                    alias = c.get("InterfaceAlias") or "?"
+                    info["adapters"].append({
+                        "alias": alias,
+                        "description": c.get("InterfaceDescription") or "",
+                        "ip": c.get("ip"),
+                        "gateway": c.get("gw") or "",
+                        "category": cat.get(alias, ""),
+                    })
+                    if not info["gateway"] and c.get("gw"):
+                        info["gateway"] = c.get("gw")
+                dns = data.get("dns")
+                if isinstance(dns, list):
+                    dns = ", ".join(str(d) for d in dns)
+                info["dns"] = dns or ""
+            except (ValueError, TypeError):
+                pass
+        if not info["adapters"]:
+            rc, out = run_cmd(["ipconfig"], timeout=15)
+            if rc == 0:
+                info["adapters"].append({"alias": "ipconfig", "description": out.strip()[:1200],
+                                         "ip": ip, "gateway": "", "category": ""})
+    try:
+        info["internet"] = port_open("1.1.1.1", 443, timeout=0.4) or port_open("8.8.8.8", 53, timeout=0.4)
+    except Exception:
+        info["internet"] = None
+    if info["internet"]:
+        info["public_ip"] = public_ip()
+    _NET_CACHE["data"] = info
+    _NET_CACHE["ts"] = time.time()
+    return info
+
+
 def system_info():
     """Reconocimiento completo del equipo (para adaptarse a cualquier PC)."""
     info = {
-        "os": f"{platform.system()} {platform.release()}",
+        "os": _os_pretty(),
         "os_version": platform.version(),
         "arch": platform.machine() or platform.processor() or "?",
         "host": socket.gethostname(),
         "user": getpass.getuser(),
         "python": platform.python_version(),
-        "cpu": platform.processor() or "?",
+        "python_exe": sys.executable,
+        "cpu": _cpu_name(),
         "cores": os.cpu_count() or 0,
+        "uptime": 0,
         "ram_total": 0,
         "ram_free": 0,
         "disk_total": 0,
         "disk_free": 0,
         "admin": is_admin(),
+        "base": get_base_dir(),
     }
     try:
         info["ram_total"], info["ram_free"] = memory_info()
+    except Exception:
+        pass
+    try:
+        info["uptime"] = _uptime_seconds()
     except Exception:
         pass
     try:
@@ -489,19 +833,124 @@ def system_info():
             info["gpu"] = _windows_gpu()
     except Exception:
         pass
+    try:
+        info["local_ip"] = local_ip()
+    except Exception:
+        info["local_ip"] = ""
     return info
 
 
+_GPU_CACHE = {"done": False, "value": ""}
+
+
 def _windows_gpu():
+    if _GPU_CACHE["done"]:
+        return _GPU_CACHE["value"]
     rc, out = run_cmd(
-        ["wmic", "path", "win32_videocontroller", "get", "name"],
-        timeout=15,
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+         "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+        timeout=20,
     )
+    if rc == 0 and out:
+        names = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        if names:
+            _GPU_CACHE["value"] = ", ".join(dict.fromkeys(names))[:160]
+            _GPU_CACHE["done"] = True
+            return _GPU_CACHE["value"]
+    rc, out = run_cmd(["wmic", "path", "win32_videocontroller", "get", "name"], timeout=15)
     if rc == 0 and out:
         names = [ln.strip() for ln in out.splitlines() if ln.strip() and "Name" not in ln]
         if names:
-            return ", ".join(dict.fromkeys(names))[:120]
-    return ""
+            _GPU_CACHE["value"] = ", ".join(dict.fromkeys(names))[:160]
+    _GPU_CACHE["done"] = True
+    return _GPU_CACHE["value"]
+
+
+def dependency_audit():
+    """
+    Auditoria universal de dependencias. Devuelve una lista de dicts con:
+    name, ok, value, required, hint, group. Sirve para que Equipo/Doctor
+    indiquen exactamente que falta y como resolverlo en cualquier PC.
+    """
+    checks = []
+
+    def add(name, ok, value="", required=False, hint="", group="Sistema"):
+        checks.append({"name": name, "ok": bool(ok), "value": value or "",
+                       "required": bool(required), "hint": hint, "group": group})
+
+    frozen = bool(getattr(sys, "frozen", False))
+    add("Python", True,
+        "incluido en Nexus.exe" if frozen else sys.version.split()[0],
+        not frozen,
+        ("Incluido en el ejecutable; no requiere instalacion." if frozen else
+         "Necesario para ejecutar NEXUS en modo Python."), "Base")
+    add("Node.js", tool_available("node"), _version_of("node"), True,
+        "Requerido por OpenCode, Antigravity y Claude Code. https://nodejs.org", "Base")
+    add("npm", tool_available("npm"), _version_of("npm"), True,
+        "Gestor de paquetes de Node (viene con Node.js).", "Base")
+    add("Git", tool_available("git"), _version_of("git"), False,
+        "Util para clonar/actualizar proyectos. https://git-scm.com", "Base")
+    add("uv", tool_available("uv"), _version_of("uv"), False,
+        "Requerido por Free Claude Code. Instalalo desde la seccion Claude.", "Claude")
+    oplire_engine = ""
+    try:
+        from . import oplire_ops as _op
+        opencode_broken = _op.opencode_broken()
+        oplire_engine = _op.find_oplire_exe() or ""
+    except Exception:
+        opencode_broken = False
+    add("OpenCode", (tool_available("opencode") or bool(_which_ext("opencode")))
+        and not opencode_broken,
+        "DANADO (postinstall no ejecutado)" if opencode_broken else _version_of("opencode"),
+        True,
+        ("Herramientas > Reparar OpenCode (postinstall)." if opencode_broken else
+         "Instalalo desde Herramientas > Instalar OpenCode (npm)."), "OpenCode")
+    add("Oplire engine", bool(oplire_engine), oplire_engine or "no encontrado", False,
+        "Copia oplire.exe a Nexus/oplire/dist/ o compilalo con build.ps1 -Release.", "OpenCode")
+    add("Cloudflare WARP", tool_available("warp-cli"), _version_of("warp-cli"), False,
+        "Necesario para rotar IP (Control de IP). https://1.1.1.1", "Red")
+    add("Claude Code", tool_available("claude"), _version_of("claude"), False,
+        "Instalalo desde Herramientas > Instalar Claude Code (npm).", "Claude")
+    add("Free Claude Code", bool(claude_dir()), claude_dir() or "no encontrado", False,
+        "Incluido en la carpeta Nexus/claude del proyecto.", "Claude")
+    add("Antigravity", bool(antigravity_dir()), antigravity_dir() or "no encontrado", False,
+        "Incluido en la carpeta antigravity/ del proyecto.", "Antigravity")
+    add("Administrador", is_admin(), "SI" if is_admin() else "no", False,
+        "Algunas operaciones de red y PATH requieren elevacion.", "Sistema")
+    return checks
+
+
+def _which_ext(name):
+    """Busqueda ampliada para executables que no estan en el PATH."""
+    try:
+        from . import antigravity_ops as _ag  # import perezoso para evitar ciclos
+        if name == "opencode":
+            return _ag.get_opencode_path()
+    except Exception:
+        pass
+    if name == "uv":
+        home = os.path.expanduser("~")
+        base = get_base_dir()
+        for cand in (
+            os.path.join(home, ".local", "bin", "uv.exe"),
+            os.path.join(home, ".cargo", "bin", "uv.exe"),
+            os.path.join(base, "tools", "uv.exe"),
+            os.path.join(base, "Nexus", "tools", "uv.exe"),
+        ):
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
+def _version_of(name):
+    if not tool_available(name):
+        return ""
+    exe = which(name) or _which_ext(name) or name
+    rc, out = run_program([exe, "--version"], timeout=10)
+    if rc != 0:
+        return ""
+    line = (out or "").strip().splitlines()
+    return line[0][:80] if line else ""
 
 
 # ---------------------------------------------------------------- red ------

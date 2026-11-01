@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import subprocess
 import ctypes
@@ -7,7 +7,7 @@ import webbrowser
 import random
 import shutil
 
-VERSION = "5.0.0 Nexus"
+VERSION = "7.3.1 Nexus"
 OPLIRE_FOLDER_NAMES = ["Oplire-OpenCode", "oplire-open_code", "oplire-opencode"]
 ANTIGRAVITY_FOLDER_NAME = "opencode-antigravity-auth"
 

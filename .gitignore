@@ -13,7 +13,15 @@ __pycache__/
 *.pyo
 *.spec
 
+# Motores de terceros: se instalan desde su upstream (npm / uv / git clone)
+# y no se versionan para no duplicar codigo ajeno en este repositorio.
+Nexus/claude/
+Nexus/antigravity/
+Nexus/tools/
+
 # Entornos y secretos
+.venv/
+venv/
 .env
 .env.*
 *.key
