@@ -25,6 +25,10 @@ licencias distintas, y ninguna se mezcla: cada componente conserva la suya.
 - Se conservan los avisos de copyright y el texto de la licencia: `LICENSE` en la raíz y
   `Nexus/oplire/LICENSE`.
 - Cualquier copia sustancial del software debe incluir ese aviso.
+- El `LICENSE` de la raíz reproduce **el texto MIT estándar sin modificaciones**: solo se
+  rellenan el año y el titular. Los terceros no se mencionan dentro del archivo de licencia
+  para no convertirlo en una licencia no estándar (GitHub lo clasificaría como *Other*), sino
+  aquí y en el README, que es donde se consultan.
 
 ### AGPL-3.0-only (Free Claude Code)
 
